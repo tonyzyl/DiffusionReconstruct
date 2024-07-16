@@ -14,4 +14,5 @@ scipy
 h5py
 pandas
 matplotlib
+Omegaconf
 ```

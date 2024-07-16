@@ -10,6 +10,8 @@ class LpLoss(object):
         p: int, p in Lp norm, default 2
         reduce_dims: int or list of int, dimensions to reduce
         reductions: str or list of str, 'sum' or 'mean' 
+
+    Call: (y_pred, y)
     '''
     def __init__(self, d=1, p=2, reduce_dims=0, reductions='sum'):
         super().__init__()
@@ -65,47 +67,27 @@ class LpLoss(object):
     def __call__(self, y_pred, y, **kwargs):
         return self.rel(y_pred, y)
 
-'''
 class EDMLoss:
     def __init__(self, sigma_data=0.5):
         self.sigma_data = sigma_data
     
     def __call__(self, y_pred, y, sigma, **kwargs):
+        # (comment from diffuser) We are not doing weighting here because it tends result in numerical problems.
+        # See: https://github.com/huggingface/diffusers/pull/7126#issuecomment-1968523051
+        # There might be other alternatives for weighting as well:
+        # https://github.com/huggingface/diffusers/pull/7126#discussion_r1505404686
         weight = (sigma ** 2 + self.sigma_data ** 2) / (sigma * self.sigma_data) ** 2
         loss = weight * ((y - y_pred) ** 2)
         return loss.mean()
-'''
-class EDMLoss:
-    def __init__(self, P_mean=-1.2, P_std=1.2, sigma_data=0.5, gamma=5):
-        self.P_mean = P_mean
-        self.P_std = P_std
+
+class EDMLoss_reg:
+    def __init__(self, sigma_data=0.5, reg_weight=0.001):
         self.sigma_data = sigma_data
-
-    def __call__(self, net, images, labels=None, augment_pipe=None, mask=None, out_channels=None):
-
-        rnd_normal = torch.randn([images.shape[0], 1, 1, 1], device=images.device)
-        sigma = (rnd_normal * self.P_std + self.P_mean).exp()
-        #if self.opts.lsun:
-            # use larger sigma for high-resolution datasets
-        #    sigma *= 380. / 80.
+        self.reg_weight = reg_weight    
+    
+    def __call__(self, y_pred, y, sigma, **kwargs):
         weight = (sigma ** 2 + self.sigma_data ** 2) / (sigma * self.sigma_data) ** 2
-        y, augment_labels = augment_pipe(images) if augment_pipe is not None else (images, None)
-        #n = torch.randn_like(y) * sigma
-        n = torch.zeros_like(y)
-        if mask is not None:
-            n[:, :out_channels] = torch.randn_like(y[:, :out_channels]) * sigma
-            n[:, :out_channels] = n[:, :out_channels] * (1 - mask) 
-        else:
-            n = torch.randn_like(y) * sigma
-        tmp_input = y + n
-        D_yn = net(tmp_input, sigma.flatten(), labels)
-        #print("y shape:", y.shape, "n shape:", n.shape)
-        #D_yn = net(y + n, sigma, labels)
-
-        target = y
-        if mask is None:
-            loss = weight * ((D_yn - target) ** 2)
-        else:
-            loss = weight * ((D_yn - target[:, :out_channels]) ** 2)
-        return loss
-#'''
+        squared_err = ((y - y_pred) ** 2)
+        csv_reg = (torch.sum(y_pred, dim=[-2, -1], keepdim=True) - torch.sum(y, dim=[-2, -1], keepdim=True))**2
+        loss = weight * squared_err + self.reg_weight * csv_reg
+        return loss.mean()

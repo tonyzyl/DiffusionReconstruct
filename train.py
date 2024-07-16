@@ -29,11 +29,12 @@ from utils.inverse_utils import create_scatter_mask
 from utils.pipeline_utils import get_sigmas
 from dataloader.dataset_class import pdedata2dataloader
 from pipelines.pipeline_inv_prob import InverseProblem2DPipeline
+from losses.metric import metric_func_2D
 
 logger = get_logger(__name__, log_level="INFO")
 
 @torch.no_grad()
-def evaluate(phase_name, config, epoch, pipeline, trackers, known_latents=None):
+def evaluate(phase_name, config, epoch, pipeline, accelerator, known_latents=None):
     # Generate some sample images
     image_dim = pipeline.unet.config.sample_size
     generator = torch.Generator(device='cpu').manual_seed(config.seed) # Use a separate torch generator to avoid rewinding the random state of the main training loop
@@ -72,14 +73,14 @@ def evaluate(phase_name, config, epoch, pipeline, trackers, known_latents=None):
         images_list.append(make_grid(torch.stack(tmp_image)))
         GT_list.append(make_grid(torch.stack(ground_truth)))
 
-    # Log images to TensorBoard
-    #tracker.writer.add_image('pressure', pressure_grid, epoch)
-    #tracker.writer.add_image('permeability', permeability_grid, epoch)
-    for tracker in trackers:
+    err_RMSE, err_nRMSE, err_CSV = metric_func_2D(sample_images, known_latents[:config.eval_batch_size], mask=mask)
+    for tracker in accelerator.trackers:
         if tracker.name == 'tensorboard':
             for i, (img, gt) in enumerate(zip(images_list, GT_list)):
                 tracker.writer.add_image(phase_name + ' sample ' + channel_names[i], img, epoch)
                 tracker.writer.add_image(phase_name + ' GT ' + channel_names[i], gt, epoch)
+            
+            accelerator.log({"RMSE": err_RMSE, "nRMSE": err_nRMSE, "CSV": err_CSV}, step=epoch)
 
     del pipeline
     if torch.cuda.is_available():
@@ -134,8 +135,9 @@ def main(args):
         **accelerator_config
     )
 
-    # Create EMA for the model.
+    # Create EMA for the model. Some examples:
     # https://github.com/huggingface/diffusers/blob/main/examples/text_to_image/train_text_to_image.py
+    # https://github.com/huggingface/diffusers/blob/main/examples/unconditional_image_generation/train_unconditional.py
     if ema_config.use_ema:
         ema_model = EMAModel(
             unet.parameters(),
@@ -178,10 +180,11 @@ def main(args):
 
         def load_model_hook(models, input_dir):
             if ema_config.use_ema:
-                # TODO: follow up on loading checkpoint with EMA
+                # TODO: follow up on loading checkpoint with EMA, ema_kwargs not properly loaded
+                # https://github.com/huggingface/diffusers/discussions/8802
                 load_model = EMAModel.from_pretrained(
-                    os.path.join(input_dir, "unet_ema"), UNet2DModel
-                    #os.path.join(input_dir, "unet_ema"), UNet2DModel, foreach=ema_config.foreach
+                    #os.path.join(input_dir, "unet_ema"), UNet2DModel
+                    os.path.join(input_dir, "unet_ema"), UNet2DModel, foreach=ema_config.foreach
                 )
                 ema_model.load_state_dict(load_model.state_dict())
                 if ema_config.offload_ema:
@@ -213,7 +216,10 @@ def main(args):
     loss_fn = instantiate_from_config(loss_fn_config)
 
     generator = torch.Generator(device='cpu').manual_seed(general_config.seed)
-    train_dataloader, val_dataloader, test_dataloader = pdedata2dataloader(**dataloader_config, generator=generator, data_name=general_config.data_name)
+    with accelerator.main_process_first():
+        # https://github.com/huggingface/accelerate/issues/503
+        # https://discuss.huggingface.co/t/shared-memory-in-accelerate/28619
+        train_dataloader, val_dataloader, test_dataloader = pdedata2dataloader(**dataloader_config, generator=generator)
 
 
     # Make one log on every process with the configuration for debugging.
@@ -369,7 +375,7 @@ def main(args):
 
                 # Add noise to the clean images according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
-                mask = create_scatter_mask(clean_images, channels=general_config.known_channels, ratio=torch.rand(1, device=clean_images.device))
+                mask = create_scatter_mask(clean_images, channels=general_config.known_channels, ratio=torch.rand(bs, device=clean_images.device))
                 noise = noise * (1 - mask)
                 if general_config.same_mask:
                     # Only use one of the known channels in this case
@@ -390,14 +396,14 @@ def main(args):
                     # on noised model inputs (before preconditioning) and the sigmas.
                     # Follow: Section 5 of https://arxiv.org/abs/2206.00364.
                     model_output = noise_scheduler.precondition_outputs(noisy_images[:, :unet_config['out_channels']], model_output, sigmas) # the last (or more) channel is the mask
-                    # We are not doing weighting here because it tends result in numerical problems.
+                    # (comment from diffuser) We are not doing weighting here because it tends result in numerical problems.
                     # See: https://github.com/huggingface/diffusers/pull/7126#issuecomment-1968523051
                     # There might be other alternatives for weighting as well:
                     # https://github.com/huggingface/diffusers/pull/7126#discussion_r1505404686
-                    weighting = (sigmas ** 2 + 0.5** 2) / (sigmas * 0.5) ** 2 # assume sigma_data=0.5 for now
-                    loss = (weighting.float() * ((clean_images.float() - model_output.float()) ** 2)).mean()
+                    #weighting = (sigmas ** 2 + 0.5** 2) / (sigmas * 0.5) ** 2 # assume sigma_data=0.5 for now
+                    #loss = (weighting.float() * ((clean_images.float() - model_output.float()) ** 2)).mean()
                     #loss = ((clean_images.float() - model_output.float()) ** 2).mean()
-                    #loss = loss_fn(model_output, clean_images, sigmas)
+                    loss = loss_fn(model_output, clean_images, sigmas)
 
                 train_loss += loss.item() / accelerator.gradient_accumulation_steps
 
@@ -480,7 +486,7 @@ def main(args):
                 pipeline = InverseProblem2DPipeline(unet, scheduler=copy.deepcopy(noise_scheduler))
                 if args.enable_xformers_memory_efficient_attention:
                     pipeline.enable_xformers_memory_efficient_attention()
-                evaluate('train', general_config, epoch, pipeline, trackers=accelerator.trackers, known_latents=batch)
+                evaluate('train', general_config, epoch, pipeline, accelerator=accelerator, known_latents=batch)
                 if ema_config.use_ema:
                     # Restore the UNet parameters.
                     ema_model.restore(unet.parameters())

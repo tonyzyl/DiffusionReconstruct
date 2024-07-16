@@ -5,18 +5,27 @@ from diffusers.utils.torch_utils import randn_tensor
 import os
 import numpy as np
 from einops import repeat
-from tqdm import tqdm
+#from tqdm.auto import tqdm
 from typing import List, Optional, Tuple, Union
 import copy
 
+from .general_utils import rand_tensor
+
 #'''
 # differences are negligible, but this one is faster
-def create_scatter_mask(tensor, channels=None, ratio=0.1, x_idx=None, y_idx=None, generator=None, device=None):
+@torch.no_grad()
+def create_scatter_mask(tensor, 
+                        channels: List[int] = None,
+                        ratio: Union[float, torch.Tensor] = 0.1, 
+                        x_idx = None, 
+                        y_idx = None, 
+                        generator = None, 
+                        device = None):
     '''
     return a mask that has the same shape as the input tensor, if multiple channels are specified, the same mask will be applied to all channels
     tensor: torch.Tensor
     channels: list of ints, denote the idx of known channels, default None. If None, all channels are masked
-    ratio: float, default 0.1. The ratio of known elements
+    ratio: float or array-like, default 0.1. The ratio of known elements
     x_idx, y_idx: int, default None. If not None, the mask will be applied to the specified indices. OrientationL (0,0) is the top left corner
 
     return: torch.Tensor (B, C, H, W)
@@ -36,16 +45,26 @@ def create_scatter_mask(tensor, channels=None, ratio=0.1, x_idx=None, y_idx=None
         if len(channels) > 1:
             mask = repeat(mask, 'B 1 H W -> B C H W', C=len(channels))
     else:
-        mask = torch.rand(B, 1, H * W, device=device, generator=generator) < ratio
+        # For now, only support same mask for all channels
+        mask = torch.zeros(B, 1, H, W, device=device)
+
+        if isinstance(ratio, float) or ratio.numel() == 1:
+            num_elements_to_select = int(H * W * ratio)
+            ratios = [num_elements_to_select] * B
+        else:
+            ratios = [int(H * W * r) for r in ratio]
+
+        for b in range(B):
+            indices = torch.randperm(H * W, device=device)[:ratios[b]]
+            mask[b, 0].view(-1)[indices] = 1
+
         if len(channels) > 1:
-            mask = repeat(mask, 'B 1 N -> B C N', C=len(channels))
+            mask = repeat(mask, 'B 1 H W -> B C H W', C=len(channels))
 
     # Initialize the final mask with zeros
     final_mask = torch.zeros_like(tensor)
-    # Convert mask to the same dtype as final_mask
     mask = mask.type_as(final_mask)
-    # Use broadcasting to set the mask values for the specified channels
-    final_mask[:, channels, :, :] = mask.view(B, len(channels), H, W)
+    final_mask[:, channels, :, :] = mask
 
     return final_mask
 
@@ -60,21 +79,6 @@ def create_patch_mask(tensor, channels=None, ratio=0.1):
     mask[:, channels] = 1
     mask[:, channels, start:end, start:end] = 0
     return mask
-
-def evaluate(config, epoch, pipeline, **kwargs):
-    # Sample some images from random noise (this is the backward diffusion process).
-    # The default pipeline output type is `List[PIL.Image]`
-    images = pipeline(
-        batch_size=config.eval_batch_size,
-        generator=torch.manual_seed(config.seed),
-        **kwargs
-    ).images
-    # Make a grid out of the images
-    image_grid = make_image_grid(images, rows=4, cols=4)
-    # Save the images
-    test_dir = os.path.join(config.output_dir, "samples")
-    os.makedirs(test_dir, exist_ok=True)
-    image_grid.save(f"{test_dir}/{epoch:04d}.png")
 
 @torch.no_grad()
 def edm_sampler(
@@ -145,7 +149,7 @@ def edm_sampler(
                 concat_mask = mask[:, [known_channels[0]]]
             else:
                 concat_mask = mask[:, known_channels]
-            tmp_x_hat = torch.cat((tmp_x_hat, concat_mask), dim=1) # Assume unknonw values for different channels are the same
+            tmp_x_hat = torch.cat((tmp_x_hat, concat_mask), dim=1)
 
         tmp_x_hat = noise_scheduler.precondition_inputs(tmp_x_hat, t_hat)
 
@@ -160,7 +164,7 @@ def edm_sampler(
             tmp_x_next = x_next.clone()
             c_noise = noise_scheduler.precondition_noise(t_next)
             if mask is not None:
-                tmp_x_next = torch.cat((tmp_x_next, concat_mask), dim=1) # Assume unknonw values for different channels are the same
+                tmp_x_next = torch.cat((tmp_x_next, concat_mask), dim=1)
             
             tmp_x_next = noise_scheduler.precondition_inputs(tmp_x_next, t_next)
 
@@ -178,6 +182,7 @@ def edm_sampler(
     else:
         return x_next
 
+@torch.no_grad()
 def ensemble_sample(pipeline, sample_size, mask, sampler_kwargs=None, class_labels=None, known_latents=None, batch_size=64,
                  sampler_type: Optional[str] = 'edm', # 'edm' or 'pipeline'
                  device='cpu',
@@ -192,18 +197,17 @@ def ensemble_sample(pipeline, sample_size, mask, sampler_kwargs=None, class_labe
     if sampler_type == 'edm':
         model = pipeline.unet
         noise_scheduler = copy.deepcopy(pipeline.scheduler)
-    with torch.no_grad():
-        for num_sample in tqdm(batch_size_list):
-            #tmp_class_labels = repeat(class_labels, 'C -> B C', B=num_sample)
-            generator = [torch.Generator(device).manual_seed(int(seed) % (1 << 32)) for seed in range(count, count+num_sample)]
-            tmp_mask = repeat(mask, '1 C H W -> B C H W', B=num_sample)
-            tmp_known_latents = repeat(known_latents, '1 C H W -> B C H W', B=num_sample)
-            if sampler_type == 'edm':
-                tmp_samples = edm_sampler(model, noise_scheduler, batch_size=num_sample, generator=generator, device=device,
-                                          class_labels=class_labels, mask=tmp_mask, known_latents=tmp_known_latents, **sampler_kwargs)
-            elif sampler_type == 'pipeline':
-                tmp_samples = pipeline(batch_size=num_sample, generator=generator, class_labels=class_labels,
-                                        mask=tmp_mask, known_latents=tmp_known_latents, return_dict=False, **sampler_kwargs)[0]
-            samples[count:count+num_sample] = tmp_samples
-            count += num_sample
+    for num_sample in batch_size_list:
+        #tmp_class_labels = repeat(class_labels, 'C -> B C', B=num_sample)
+        generator = [torch.Generator(device).manual_seed(int(seed) % (1 << 32)) for seed in range(count, count+num_sample)]
+        tmp_mask = repeat(mask, '1 C H W -> B C H W', B=num_sample)
+        tmp_known_latents = repeat(known_latents, '1 C H W -> B C H W', B=num_sample)
+        if sampler_type == 'edm':
+            tmp_samples = edm_sampler(model, noise_scheduler, batch_size=num_sample, generator=generator, device=device,
+                                        class_labels=class_labels, mask=tmp_mask, known_latents=tmp_known_latents, **sampler_kwargs)
+        elif sampler_type == 'pipeline':
+            tmp_samples = pipeline(batch_size=num_sample, generator=generator, 
+                                    mask=tmp_mask, known_latents=tmp_known_latents, return_dict=False, **sampler_kwargs)[0]
+        samples[count:count+num_sample] = tmp_samples
+        count += num_sample
     return samples

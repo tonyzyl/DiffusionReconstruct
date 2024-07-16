@@ -29,14 +29,18 @@ from utils.pipeline_utils import get_sigmas
 from utils.vt_utils import vt_obs, diffuserUNet2D
 from dataloader.dataset_class import pdedata2dataloader
 from pipelines.pipeline_inv_prob import InverseProblem2DPipeline
+from losses.metric import metric_func_2D
 
 logger = get_logger(__name__, log_level="INFO")
 
 @torch.no_grad()
-def evaluate(phase_name, config, epoch, vt, model, trackers, known_latents=None):
+def evaluate(phase_name, config, epoch, vt, model, accelerator, known_latents=None):
     # Generate some sample images
     image_dim = known_latents.shape[-1]
-    interpolated_fields = vt(known_latents)
+    generator = torch.Generator(device='cpu').manual_seed(config.seed) # Use a separate torch generator to avoid rewinding the random state of the main training loop
+    tmp_latents = known_latents[:config.eval_batch_size]
+    mask = create_scatter_mask(tmp_latents, channels=config.known_channels, ratio=0.02, generator=generator, device=known_latents.device)
+    interpolated_fields = vt(known_latents[:config.eval_batch_size], mask=mask)
     #'''
     sample_images = model(
         interpolated_fields,
@@ -64,14 +68,14 @@ def evaluate(phase_name, config, epoch, vt, model, trackers, known_latents=None)
         images_list.append(make_grid(torch.stack(tmp_image)))
         GT_list.append(make_grid(torch.stack(ground_truth)))
 
-    # Log images to TensorBoard
-    #tracker.writer.add_image('pressure', pressure_grid, epoch)
-    #tracker.writer.add_image('permeability', permeability_grid, epoch)
-    for tracker in trackers:
+    err_RMSE, err_nRMSE, err_CSV = metric_func_2D(sample_images, known_latents[:config.eval_batch_size], mask=mask)
+    for tracker in accelerator.trackers:
         if tracker.name == 'tensorboard':
             for i, (img, gt) in enumerate(zip(images_list, GT_list)):
                 tracker.writer.add_image(phase_name + ' sample ' + channel_names[i], img, epoch)
                 tracker.writer.add_image(phase_name + ' GT ' + channel_names[i], gt, epoch)
+            
+            accelerator.log({"RMSE": err_RMSE, "nRMSE": err_nRMSE, "CSV": err_CSV}, step=epoch)
 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -116,7 +120,8 @@ def main(args):
 
     set_seed(general_config.seed)
 
-    del unet_config['resnet_time_scale_shift'] # No temb
+    if 'resnet_time_scale_shift' in unet_config:
+        del unet_config['resnet_time_scale_shift'] # No temb
     unet = diffuserUNet2D.from_config(config=unet_config)
 
     logging_dir = Path(general_config.output_dir, general_config.logging_dir)
@@ -127,7 +132,7 @@ def main(args):
     )
 
     vt = vt_obs(x_dim=unet_config['sample_size'], y_dim=unet_config['sample_size'], 
-                x_spacing=7, y_spacing=7, device=accelerator.device)
+                known_channels=general_config.known_channels, x_spacing=8, y_spacing=8, device=accelerator.device)
 
     # Create EMA for the model.
     if ema_config.use_ema:
@@ -201,7 +206,10 @@ def main(args):
     loss_fn = instantiate_from_config(loss_fn_config)
 
     generator = torch.Generator(device='cpu').manual_seed(general_config.seed)
-    train_dataloader, val_dataloader, test_dataloader = pdedata2dataloader(**dataloader_config, generator=generator, data_name=general_config.data_name)
+    with accelerator.main_process_first():
+        # https://github.com/huggingface/accelerate/issues/503
+        # https://discuss.huggingface.co/t/shared-memory-in-accelerate/28619
+        train_dataloader, val_dataloader, test_dataloader = pdedata2dataloader(**dataloader_config, generator=generator)
 
 
     # Make one log on every process with the configuration for debugging.
@@ -236,9 +244,11 @@ def main(args):
                                  num_cycles = lr_scheduler_config.num_cycles,
                                  power = lr_scheduler_config.power)
 
+    print('start preparing dataloader')
     unet, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.prepare(
                     unet, optimizer, train_dataloader, val_dataloader, lr_scheduler
     )
+    print('finished preparing dataloader')
 
     if ema_config.use_ema:
         if ema_config.offload_ema:
@@ -258,18 +268,6 @@ def main(args):
     if accelerator.is_main_process:
         print(tracker_config)
         accelerator.init_trackers(general_config.tracker_project_name, config=tracker_config)
-
-    '''
-    # Initialize accelerator and tensorboard logging
-    if accelerator.is_main_process:
-        if general_config.output_dir is not None:
-            os.makedirs(general_config.output_dir, exist_ok=True)
-        if config.push_to_hub:
-            repo_id = create_repo(
-                repo_id=config.hub_model_id or Path(config.output_dir).name, exist_ok=True
-            ).repo_id
-        accelerator.init_trackers("train")
-    '''
 
     # Function for unwrapping if model was compiled with `torch.compile`.
     def unwrap_model(model):
@@ -335,7 +333,12 @@ def main(args):
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(unet):
                 clean_images = batch
-                interpolated_fields = vt(clean_images)
+                #interpolated_fields = vt(clean_images)
+                tmp_ratio = torch.rand(clean_images.shape[0], device=clean_images.device)
+                tmp_ratio = torch.where(tmp_ratio<=0.001, 0.001, tmp_ratio) # to avoid no points get sampled
+                mask = create_scatter_mask(clean_images, channels=general_config.known_channels, 
+                                           ratio=tmp_ratio)
+                interpolated_fields = vt(clean_images, mask=mask)
                 denoised_fields = unet(interpolated_fields, return_dict=False)[0]
                 loss = ((clean_images.float() - denoised_fields.float()) ** 2).mean()
                 train_loss += loss.item() / accelerator.gradient_accumulation_steps
@@ -416,7 +419,7 @@ def main(args):
                     # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
                     ema_model.store(unet.parameters())
                     ema_model.copy_to(unet.parameters())
-                evaluate('train', general_config, epoch, vt, unet, trackers=accelerator.trackers, known_latents=batch)
+                evaluate('train', general_config, epoch, vt, unet, accelerator=accelerator, known_latents=batch)
                 if ema_config.use_ema:
                     # Restore the UNet parameters.
                     ema_model.restore(unet.parameters())
@@ -430,7 +433,8 @@ def main(args):
             if ema_config.use_ema:
                 ema_model.store(unet.parameters())
                 ema_model.copy_to(unet.parameters())
-            save_path = os.path.join(general_config.output_dir, f"epoch-{epoch}")
+            #save_path = os.path.join(general_config.output_dir, f"epoch-{epoch}")
+            save_path = os.path.join(general_config.output_dir, "epoch_checkpoint")
             accelerator.save_state(save_path)
             if ema_config.use_ema:
                 ema_model.restore(unet.parameters())
