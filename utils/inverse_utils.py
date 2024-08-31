@@ -27,9 +27,11 @@ def create_scatter_mask(tensor,
     channels: list of ints, denote the idx of known channels, default None. If None, all channels are masked
     ratio: float or array-like, default 0.1. The ratio of known elements
     x_idx, y_idx: int, default None. If not None, the mask will be applied to the specified indices. OrientationL (0,0) is the top left corner
+                  They can be either 2D or 1D tensors
 
     return: torch.Tensor (B, C, H, W)
     '''
+    #TODO: handle generator
     if device is None:
         device = tensor.device
     B, C, H, W = tensor.shape
@@ -81,10 +83,114 @@ def create_patch_mask(tensor, channels=None, ratio=0.1):
     return mask
 
 @torch.no_grad()
-def edm_sampler(
+def edm_sampler_cond(
     net, noise_scheduler, batch_size=1, class_labels=None, randn_like=torch.randn_like,
     num_inference_steps=18, S_churn=0, S_min=0, S_max=float('inf'), S_noise=0,
-    deterministic=True, mask=None, same_mask=True, known_channels=None, known_latents=None,
+    deterministic=True, mask=None, known_latents=None, known_channels=None,
+    return_trajectory=False, add_noise_to_obs=False,
+    generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+    device = 'cpu'
+):
+    '''
+    mask: torch.Tensor, shape (H, W) or (B, C, H, W), 1 for known values, 0 for unknown
+    known_latents: torch.Tensor, shape (H, W) or (B, C, H, W), known values
+    '''
+    if known_latents is not None:
+        assert batch_size == known_latents.shape[0], "Batch size must match the known_latents shape"
+        # Sample gaussian noise to begin loop
+
+    if isinstance(device, str):
+        device = torch.device(device)
+
+    if isinstance(net.config.sample_size, int):
+        latents_shape = (
+            batch_size,
+            net.config.out_channels,
+            net.config.sample_size,
+            net.config.sample_size,
+        )
+    else:
+        latents_shape = (batch_size, net.config.out_channels, *net.config.sample_size)
+
+    latents = randn_tensor(latents_shape, generator=generator, device=device, dtype=net.dtype)
+    if add_noise_to_obs:
+        noise = latents.clone()
+    conditioning_tensors = torch.cat((known_latents, mask[:, [known_channels[0]]]), dim=1)
+    noise_scheduler.set_timesteps(num_inference_steps, device=device)
+
+    t_steps = noise_scheduler.sigmas.to(device)
+
+    x_next = latents.to(torch.float64) * t_steps[0]
+    if mask is not None:
+        if len(mask.shape) == 2:
+            mask = mask[None, None, ...].expand_as(x_next)
+    else:
+        mask = torch.zeros_like(x_next)
+    if mask is not None:
+        x_next = x_next * (1 - mask) + known_latents * mask
+
+    if return_trajectory:
+        whole_trajectory = torch.zeros((num_inference_steps, *x_next.shape), dtype=torch.float64)
+    # Main sampling loop.
+    for i, (t_cur, t_next) in enumerate(zip(t_steps[:-1], t_steps[1:])):  # 0, ..., N-1
+        x_cur = x_next
+        if not deterministic:
+            # Increase noise temporarily.
+            gamma = min(S_churn / num_inference_steps, np.sqrt(2) - 1) if S_min <= t_cur <= S_max else 0
+            t_hat = torch.as_tensor(t_cur + gamma * t_cur)
+            x_hat = x_cur + (t_hat ** 2 - t_cur ** 2).sqrt() * S_noise * randn_like(x_cur) * (1 - mask)
+        else:
+            t_hat = t_cur
+            x_hat = x_cur
+
+        if known_latents is not None and add_noise_to_obs:
+            tmp_known_latents = known_latents.clone()
+            tmp_known_latents = noise_scheduler.add_noise(tmp_known_latents, noise, t_hat.view(-1))
+            x_hat = x_hat * (1 - mask) + tmp_known_latents * mask
+
+        tmp_x_hat = x_hat.clone()
+        c_noise = noise_scheduler.precondition_noise(t_hat)
+        # Euler step.
+        tmp_x_hat = noise_scheduler.precondition_inputs(tmp_x_hat, t_hat)
+
+        denoised = net(tmp_x_hat.to(torch.float32), c_noise.reshape(-1).to(torch.float32), conditioning_tensors).sample.to(torch.float64)
+        denoised = noise_scheduler.precondition_outputs(x_hat, denoised, t_hat)
+
+        d_cur = (x_hat - denoised) / t_hat # denoise has the same shape as x_hat (b, out_channels, h, w)
+        x_next = x_hat + (t_next - t_hat) * d_cur * (1 - mask)
+
+        # Apply 2nd order correction.
+        if i < num_inference_steps - 1:
+
+            if known_latents is not None and add_noise_to_obs:
+                tmp_known_latents = known_latents.clone()
+                tmp_known_latents = noise_scheduler.add_noise(tmp_known_latents, noise, t_next.view(-1))
+                x_next = x_next * (1 - mask) + tmp_known_latents * mask
+
+            tmp_x_next = x_next.clone()
+            c_noise = noise_scheduler.precondition_noise(t_next)
+            
+            tmp_x_next = noise_scheduler.precondition_inputs(tmp_x_next, t_next)
+
+            denoised = net(tmp_x_next.to(torch.float32),c_noise.reshape(-1).to(torch.float32), conditioning_tensors).sample.to(torch.float64)
+            denoised = noise_scheduler.precondition_outputs(x_next, denoised, t_next)
+
+            d_prime = (x_next - denoised) / t_next
+            x_next = x_hat + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime) * (1 - mask)
+
+        if return_trajectory:
+            whole_trajectory[i] = x_next
+
+    if return_trajectory:
+        return x_next, whole_trajectory
+    else:
+        return x_next
+
+@torch.no_grad()
+def edm_sampler_uncond(
+    net, noise_scheduler, batch_size=1, class_labels=None, randn_like=torch.randn_like,
+    num_inference_steps=18, S_churn=0, S_min=0, S_max=float('inf'), S_noise=0,
+    deterministic=True, mask=None, known_channels=None, known_latents=None,
     return_trajectory=False,
     generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
     device = 'cpu'
@@ -111,20 +217,17 @@ def edm_sampler(
         latents_shape = (batch_size, net.config.out_channels, *net.config.sample_size)
 
     latents = randn_tensor(latents_shape, generator=generator, device=device, dtype=net.dtype)
+    noise = latents.clone()
     noise_scheduler.set_timesteps(num_inference_steps, device=device)
 
     t_steps = noise_scheduler.sigmas.to(device)
 
-    x_next = latents.to(torch.float64) * t_steps[0]
+    x_next = latents.to(torch.float64) * t_steps[0] # edm start with max sigma
     if mask is not None:
         if len(mask.shape) == 2:
             mask = mask[None, None, ...].expand_as(x_next)
-        #if len(known_latents.shape) == 2:
-        #    known_latents = known_latents[None, None, ...].expand_as(x_next)
     else:
         mask = torch.zeros_like(x_next)
-    if known_latents is not None:
-        x_next = x_next * (1 - mask) + known_latents * mask
 
     if return_trajectory:
         whole_trajectory = torch.zeros((num_inference_steps, *x_next.shape), dtype=torch.float64)
@@ -135,36 +238,43 @@ def edm_sampler(
             # Increase noise temporarily.
             gamma = min(S_churn / num_inference_steps, np.sqrt(2) - 1) if S_min <= t_cur <= S_max else 0
             t_hat = torch.as_tensor(t_cur + gamma * t_cur)
-            x_hat = x_cur + (t_hat ** 2 - t_cur ** 2).sqrt() * S_noise * randn_like(x_cur) * (1 - mask)
+            x_hat = x_cur + (t_hat ** 2 - t_cur ** 2).sqrt() * S_noise * randn_like(x_cur)
         else:
             t_hat = t_cur
             x_hat = x_cur
 
+        if known_latents is not None:
+            tmp_known_latents = known_latents.clone()
+            tmp_known_latents = noise_scheduler.add_noise(tmp_known_latents, noise, t_hat.view(-1))
+            x_hat = x_hat * (1 - mask) + tmp_known_latents * mask
+
         tmp_x_hat = x_hat.clone()
         c_noise = noise_scheduler.precondition_noise(t_hat)
         # Euler step.
-        if mask is not None:
-            if same_mask:
-                # Only use one of the known channels in this case
-                concat_mask = mask[:, [known_channels[0]]]
-            else:
-                concat_mask = mask[:, known_channels]
-            tmp_x_hat = torch.cat((tmp_x_hat, concat_mask), dim=1)
-
         tmp_x_hat = noise_scheduler.precondition_inputs(tmp_x_hat, t_hat)
 
         denoised = net(tmp_x_hat.to(torch.float32), c_noise.reshape(-1).to(torch.float32), class_labels).sample.to(torch.float64)
         denoised = noise_scheduler.precondition_outputs(x_hat, denoised, t_hat)
 
         d_cur = (x_hat - denoised) / t_hat # denoise has the same shape as x_hat (b, out_channels, h, w)
-        x_next = x_hat + (t_next - t_hat) * d_cur * (1 - mask)
+        x_next = x_hat + (t_next - t_hat) * d_cur
 
         # Apply 2nd order correction.
         if i < num_inference_steps - 1:
+
+            #"""
+            if known_latents is not None:
+                tmp_known_latents = known_latents.clone()
+                tmp_known_latents = noise_scheduler.add_noise(tmp_known_latents, noise, t_next.view(-1))
+                x_next = x_next * (1 - mask) + tmp_known_latents * mask
+            #"""
+
             tmp_x_next = x_next.clone()
             c_noise = noise_scheduler.precondition_noise(t_next)
+            """
             if mask is not None:
                 tmp_x_next = torch.cat((tmp_x_next, concat_mask), dim=1)
+            """
             
             tmp_x_next = noise_scheduler.precondition_inputs(tmp_x_next, t_next)
 
@@ -172,7 +282,7 @@ def edm_sampler(
             denoised = noise_scheduler.precondition_outputs(x_next, denoised, t_next)
 
             d_prime = (x_next - denoised) / t_next
-            x_next = x_hat + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime) * (1 - mask)
+            x_next = x_hat + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime)
 
         if return_trajectory:
             whole_trajectory[i] = x_next
@@ -183,9 +293,9 @@ def edm_sampler(
         return x_next
 
 @torch.no_grad()
-def ensemble_sample(pipeline, sample_size, mask, sampler_kwargs=None, class_labels=None, known_latents=None, batch_size=64,
-                 sampler_type: Optional[str] = 'edm', # 'edm' or 'pipeline'
-                 device='cpu',
+def ensemble_sample(pipeline, sample_size, mask, sampler_kwargs=None, class_labels=None, known_latents=None, 
+                    batch_size=64, sampler_type: Optional[str] = 'edm', # 'edm' or 'pipeline'
+                    device='cpu', conditioning_type='xattn', # 'xattn' or 'cfg'
                  ):
     batch_size_list = [batch_size]*int(sample_size/batch_size) + [sample_size % batch_size]
     #print(latents.shape, class_labels.shape, mask.shape, known_latents.shape)
@@ -203,7 +313,11 @@ def ensemble_sample(pipeline, sample_size, mask, sampler_kwargs=None, class_labe
         tmp_mask = repeat(mask, '1 C H W -> B C H W', B=num_sample)
         tmp_known_latents = repeat(known_latents, '1 C H W -> B C H W', B=num_sample)
         if sampler_type == 'edm':
-            tmp_samples = edm_sampler(model, noise_scheduler, batch_size=num_sample, generator=generator, device=device,
+            if conditioning_type == 'xattn' or conditioning_type == 'cfg':
+                tmp_samples = edm_sampler_cond(model, noise_scheduler, batch_size=num_sample, generator=generator, device=device,
+                                        class_labels=class_labels, mask=tmp_mask, known_latents=tmp_known_latents, **sampler_kwargs)
+            elif conditioning_type == 'uncond':
+                tmp_samples = edm_sampler_uncond(model, noise_scheduler, batch_size=num_sample, generator=generator, device=device,
                                         class_labels=class_labels, mask=tmp_mask, known_latents=tmp_known_latents, **sampler_kwargs)
         elif sampler_type == 'pipeline':
             tmp_samples = pipeline(batch_size=num_sample, generator=generator, 

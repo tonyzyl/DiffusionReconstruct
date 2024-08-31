@@ -1,12 +1,13 @@
 import argparse
 import logging
 import os
+from datetime import timedelta
 import torch
 import shutil
 from packaging import version
 import accelerate
 from accelerate import Accelerator
-from accelerate.utils import ProjectConfiguration, set_seed
+from accelerate.utils import ProjectConfiguration, set_seed, InitProcessGroupKwargs
 from accelerate.logging import get_logger
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel
@@ -16,19 +17,16 @@ from torch.optim import AdamW
 import torch.nn.functional as F
 from torchvision.utils import make_grid
 from tqdm.auto import tqdm
-import numpy as np
 from omegaconf import OmegaConf
 from pathlib import Path
-import copy
 import math
+from huggingface_hub import upload_folder
 
-from noise_schedulers.noise_sampler import Karras_sigmas_lognormal
+from models.unet2D import diffuserUNet2D
 from utils.general_utils import instantiate_from_config, flatten_and_filter_config, convert_to_rgb
 from utils.inverse_utils import create_scatter_mask
-from utils.pipeline_utils import get_sigmas
-from utils.vt_utils import vt_obs, diffuserUNet2D
+from utils.vt_utils import vt_obs
 from dataloader.dataset_class import pdedata2dataloader
-from pipelines.pipeline_inv_prob import InverseProblem2DPipeline
 from losses.metric import metric_func_2D
 
 logger = get_logger(__name__, log_level="INFO")
@@ -46,13 +44,6 @@ def evaluate(phase_name, config, epoch, vt, model, accelerator, known_latents=No
         interpolated_fields,
         return_dict=False,
     )[0]
-    '''
-    sample_images = edm_sampler(pipeline.unet, pipeline.noise_scheduler, batch_size=config.eval_batch_size, class_labels=None, 
-                            known_latents=known_latents[:config.eval_batch_size], mask=mask,
-                           same_mask=general_config.same_mask, known_channels=general_config.known_channels, num_inference_steps=20,
-                           device = pipeline.device, generator=generator)
-    sample_images = sample_images.cpu()
-    '''
     try:
         channel_names = config.channel_names
     except:
@@ -101,6 +92,15 @@ def parse_args():
     parser.add_argument(
         "--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers."
     )
+    parser.add_argument(
+        "--hub_model_id",
+        type=str,
+        default=None,
+        help="The name of the repository to keep in sync with the local `output_dir`.",
+    )
+    parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
+    parser.add_argument("--hub_token", type=str, default=None, help="The token to use to push to the Model Hub.")
+
     return parser.parse_args()
 
 def main(args):
@@ -126,11 +126,14 @@ def main(args):
 
     logging_dir = Path(general_config.output_dir, general_config.logging_dir)
     accelerator_project_config = ProjectConfiguration(project_dir=general_config.output_dir, logging_dir=logging_dir)
+    kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=1800))
     accelerator = Accelerator(
         project_config=accelerator_project_config,
-        **accelerator_config
+        **accelerator_config,
+        kwargs_handlers=[kwargs]
     )
 
+    # spacing can be arbitrary when only using the vt to interpolate fields
     vt = vt_obs(x_dim=unet_config['sample_size'], y_dim=unet_config['sample_size'], 
                 known_channels=general_config.known_channels, x_spacing=8, y_spacing=8, device=accelerator.device)
 
@@ -180,7 +183,7 @@ def main(args):
                 # TODO: follow up on loading checkpoint with EMA
                 load_model = EMAModel.from_pretrained(
                     #os.path.join(input_dir, "unet_ema"), UNet2DModel
-                    os.path.join(input_dir, "unet_ema"), diffuserUNet2D, foreach=ema_config.foreach
+                    os.path.join(input_dir, "unet_ema"), diffuserUNet2D, #foreach=ema_config.foreach # not yet released in v0.29.2
                 )
                 ema_model.load_state_dict(load_model.state_dict())
                 if ema_config.offload_ema:
@@ -309,7 +312,8 @@ def main(args):
             initial_global_step = 0
         else:
             accelerator.print(f"Resuming from checkpoint {path}")
-            accelerator.load_state(os.path.join(general_config.output_dir, path))
+            if accelerator.is_main_process: # temp fix for only having one random state
+                accelerator.load_state(os.path.join(general_config.output_dir, path))
             global_step = int(path.split("-")[1])
 
             initial_global_step = global_step
@@ -334,7 +338,7 @@ def main(args):
             with accelerator.accumulate(unet):
                 clean_images = batch
                 #interpolated_fields = vt(clean_images)
-                tmp_ratio = torch.rand(clean_images.shape[0], device=clean_images.device)
+                tmp_ratio = torch.rand(clean_images.shape[0], device=clean_images.device)*0.1
                 tmp_ratio = torch.where(tmp_ratio<=0.001, 0.001, tmp_ratio) # to avoid no points get sampled
                 mask = create_scatter_mask(clean_images, channels=general_config.known_channels, 
                                            ratio=tmp_ratio)
@@ -414,30 +418,36 @@ def main(args):
         if accelerator.is_main_process:
 
             if (epoch + 1) % general_config.save_image_epochs == 0 or epoch == general_config.num_epochs - 1:
-                unet = unwrap_model(unet)
                 if ema_config.use_ema:
                     # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
                     ema_model.store(unet.parameters())
                     ema_model.copy_to(unet.parameters())
-                evaluate('train', general_config, epoch, vt, unet, accelerator=accelerator, known_latents=batch)
+                evaluate('train', general_config, epoch, vt, unwrap_model(unet), accelerator=accelerator, known_latents=batch)
                 if ema_config.use_ema:
                     # Restore the UNet parameters.
                     ema_model.restore(unet.parameters())
 
-        accelerator.wait_for_everyone()
+            if (epoch + 1) % general_config.save_model_epochs == 0 or epoch == general_config.num_epochs - 1:
+                # save the model
 
-        if (epoch + 1) % general_config.save_image_epochs == 0 or epoch == general_config.num_epochs - 1:
-            # save the model
-            unet = unwrap_model(unet)
+                if ema_config.use_ema:
+                    ema_model.store(unet.parameters())
+                    ema_model.copy_to(unet.parameters())
 
-            if ema_config.use_ema:
-                ema_model.store(unet.parameters())
-                ema_model.copy_to(unet.parameters())
-            #save_path = os.path.join(general_config.output_dir, f"epoch-{epoch}")
-            save_path = os.path.join(general_config.output_dir, "epoch_checkpoint")
-            accelerator.save_state(save_path)
-            if ema_config.use_ema:
-                ema_model.restore(unet.parameters())
+                unwrap_model(unet).save_pretrained(os.path.join(general_config.output_dir, "unet"))
+
+                if ema_config.use_ema:
+                    ema_model.restore(unet.parameters())
+                
+                if args.push_to_hub:
+                    upload_folder(
+                        repo_id=args.hub_model_id,
+                        folder_path=general_config.output_dir+"/unet",
+                        path_in_repo=general_config.output_dir.split("/")[-1],
+                        commit_message="running weight",
+                        ignore_patterns=["checkpoint_"],
+                        token=args.hub_token if args.hub_token else None,
+                    )
 
     accelerator.end_training()
 

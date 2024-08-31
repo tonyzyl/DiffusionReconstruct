@@ -1,0 +1,148 @@
+unet:
+  _class_name: diffuserUNet2DCondition
+  _diffusers_version: 0.29.2
+  act_fn: silu
+  addition_embed_type: null
+  addition_embed_type_num_heads: 64
+  addition_time_embed_dim: null
+  attention_head_dim: 8
+  attention_type: default
+  block_out_channels:
+    - 128
+    - 256
+    - 256
+  center_input_sample: false
+  class_embed_type: null
+  class_embeddings_concat: false
+  conv_in_kernel: 3
+  conv_out_kernel: 3
+  cross_attention_dim: 384
+  cross_attention_norm: null
+  down_block_types:
+    - DownBlock2D
+    - CrossAttnDownBlock2D
+    - CrossAttnDownBlock2D
+  downsample_padding: 1
+  dropout: 0.0
+  dual_cross_attention: false
+  encoder_hid_dim: null
+  encoder_hid_dim_type: null
+  flip_sin_to_cos: true
+  freq_shift: 0
+  in_channels: 3
+  layers_per_block: 2
+  mid_block_only_cross_attention: null
+  mid_block_scale_factor: 1
+  mid_block_type: UNetMidBlock2DCrossAttn
+  norm_eps: 1e-05
+  norm_num_groups: 32
+  num_attention_heads: null
+  num_class_embeds: null
+  only_cross_attention: false
+  out_channels: 3
+  projection_class_embeddings_input_dim: null
+  resnet_out_scale_factor: 1.0
+  resnet_skip_time_act: false
+  resnet_time_scale_shift: scale_shift
+  reverse_transformer_layers_per_block: null
+  sample_size: 64
+  time_cond_proj_dim: null
+  time_embedding_act_fn: null
+  time_embedding_dim: null
+  time_embedding_type: positional
+  timestep_post_act: null
+  transformer_layers_per_block: 1
+  up_block_types:
+    - CrossAttnUpBlock2D
+    - CrossAttnUpBlock2D
+    - UpBlock2D
+  upcast_attention: false
+  use_linear_projection: false
+  field_encoder_dict:
+    hidden_size: 384
+    intermediate_size: 1536
+    projection_dim: 384
+    image_size: 
+      - 64
+      - 64
+    patch_size: 4
+    num_channels: 3
+    num_hidden_layers: 4
+    num_attention_heads: 8
+    input_padding:
+      - 0
+      - 0
+    output_hidden_state: true
+
+
+noise_scheduler:
+  target: diffusers.EDMDPMSolverMultistepScheduler
+  params:
+    num_train_timesteps: 1000
+
+loss_fn:
+  target: losses.loss.EDMLoss
+  params:
+    sigma_data: 0.5
+
+optimizer:
+  betas:
+    - 0.9
+    - 0.999
+  eps: 1e-08
+  lr: 1e-4
+  weight_decay: 1e-2
+
+lr_scheduler:
+  #name: cosine
+  name: constant
+  num_warmup_steps: 500
+  num_cycles: 0.5
+  power: 1.0
+
+dataloader:
+  data_dir: /scratch/kdur_root/kdur/ylzhuang/uvh_unrolled.npy
+  batch_size: 16
+  num_workers: 0
+  split_ratios: 
+    - 0.8
+    - 0.2
+    - 0.0
+  transform: normalize
+  transform_args:
+    mean: [0., 0., 1.0055307]  
+    std: [0.0089056, 0.0089056, 0.0137398] 
+    target_std: 0.5
+  data_name: shallow_water
+
+accelerator:
+  mixed_precision: fp16
+  gradient_accumulation_steps: 1
+  log_with: tensorboard
+
+ema:
+  use_ema: True
+  offload_ema: False
+  ema_max_decay: 0.9999
+  ema_inv_gamma: 1.0
+  ema_power: 0.75
+  foreach: True
+
+general:
+  seed: 42
+  num_epochs: null
+  num_training_steps: 100000
+  known_channels: [0, 1, 2]
+  same_mask: True
+  scale_lr: False
+  output_dir: /scratch/kdur_root/kdur/ylzhuang/log/shallow_water_xattn
+  logging_dir: sw
+  tracker_project_name: sw_tracker
+  save_image_epochs: 50
+  save_model_epochs: 200
+  checkpointing_steps: 25000
+  eval_batch_size: 8
+  cond_drop_prob: null
+  do_edm_style_training: True
+  snr_gamma: null
+  channel_names: ["u", "v", "h"]

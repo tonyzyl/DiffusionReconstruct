@@ -200,7 +200,7 @@ def plot_steps(samples, idx_in_batch=0, start_step=0, interval=1, mask=None):
     plt.tight_layout()
     plt.show()
 
-def plot_one_sample(samples, num_in_batch=0, title=None, cb=True, mask=None, save=False):
+def plot_one_sample(samples, num_in_batch=0, cb=True, mask=None, channel_names=None, save_name=None, dpi=300):
     '''
     samples: (B, C, H, W), mask: (B, C, H, W)
     '''
@@ -214,7 +214,9 @@ def plot_one_sample(samples, num_in_batch=0, title=None, cb=True, mask=None, sav
     image = samples[num_in_batch, :, :, :]
     fig, axes = plt.subplots(num_images, 1, figsize=(4, int(4*num_images)), sharey=True, sharex=True)
     for i, ax in enumerate(axes.flatten()):
-        im = ax.imshow(image[i, :, :], cmap='jet')
+        im = ax.imshow(image[i, :, :], cmap='jet', origin='lower')
+        if channel_names is not None:
+            ax.set_title(channel_names[i])
         ax.axis('off')
         if cb:
             fig.colorbar(im, ax=ax)
@@ -223,8 +225,68 @@ def plot_one_sample(samples, num_in_batch=0, title=None, cb=True, mask=None, sav
             mask_indices = np.where(tmp_mask == 1)
             ax.scatter(mask_indices[1], mask_indices[0], c='black', marker='x', s=7)
     plt.tight_layout()
-    if save:
-        plt.savefig(title + '.png', dpi=300, bbox_inches='tight')
+    #if title is not None:
+    #    plt.suptitle(title, fontsize=16)
+    if save_name is not None:
+        plt.savefig(save_name + '.png', dpi=dpi, bbox_inches='tight')
+
+def plot_horizontal(images_list, channel_names=None, image_names=None, save_name=None, mask=None, plot_mask_idx=[], which_cb=None, dpi=300):
+    '''
+    images_list: list of images, each with shape (C, H, W)
+    mask: Optional, shape (C, H, W)
+    which_cb: Optional, index of the image to be used for scaling the color bar
+    '''
+    try:
+        tmp_images_list = []
+        for img in images_list:
+            try:
+                tmp_images_list.append(img.detach().cpu().numpy())
+            except:
+                tmp_images_list.append(img)
+        images_list = tmp_images_list
+        if mask is not None:
+            mask = mask.detach().cpu().numpy()
+    except:
+        pass
+    num_images = len(images_list)
+    num_channels = images_list[0].shape[0]
+
+    fig, axes = plt.subplots(num_channels, num_images, figsize=(4*num_images, 4*num_channels), sharey=True, sharex=True)
+    
+    if which_cb is not None and 0 <= which_cb < num_images:
+        cb_image = images_list[which_cb]
+        vmin = cb_image.min(axis=(1, 2))
+        vmax = cb_image.max(axis=(1, 2))
+    else:
+        vmin, vmax = None, None
+
+    for img_idx, image in enumerate(images_list):
+        for ch_idx in range(num_channels):
+            ax = axes[ch_idx, img_idx] if num_channels > 1 else axes[img_idx]
+            im = ax.imshow(image[ch_idx, :, :], cmap='jet', origin='lower', vmin=vmin[ch_idx] if vmin is not None else None, vmax=vmax[ch_idx] if vmax is not None else None)
+            if mask is not None:
+                if img_idx in plot_mask_idx:
+                    tmp_mask = mask[ch_idx, :, :]
+                    mask_indices = np.where(tmp_mask == 1)
+                    ax.scatter(mask_indices[1], mask_indices[0], c='black', marker='x', s=7)
+            if channel_names is not None:
+                if image_names is None: 
+                    ax.set_title(channel_names[ch_idx])
+                else:
+                    ax.set_title(f'{channel_names[ch_idx]} - {image_names[img_idx]}')
+            ax.axis('off')
+    
+    if which_cb is not None:
+        for ch_idx in range(num_channels):
+            ax_pos = axes[ch_idx, -1].get_position()
+            cbar_height = ax_pos.height * 0.8
+            cbar_ax = fig.add_axes([ax_pos.x1 + 0.02, ax_pos.y0 + (ax_pos.height - cbar_height) / 2, 0.02, cbar_height])
+            fig.colorbar(plt.cm.ScalarMappable(norm=plt.Normalize(vmin=vmin[ch_idx], vmax=vmax[ch_idx]), cmap='jet'), cax=cbar_ax)
+
+    plt.tight_layout(rect=[0, 0, 0.9, 1])
+    if save_name is not None:
+        plt.savefig(save_name + '.png', dpi=dpi, bbox_inches='tight')
+    plt.show()
 
 def plot_ensemble(samples, title, cb=True, mask=None, save=False, GT=None):
     # 1st row is mean, 2nd row is std

@@ -1,0 +1,113 @@
+unet:
+  _class_name: UNet2DModel
+  _diffusers_version: 0.28.2
+  act_fn: silu
+  add_attention: true
+  attention_head_dim: 8
+  attn_norm_num_groups: null
+  block_out_channels:
+    - 128
+    - 256
+    - 256
+    - 256
+  center_input_sample: false
+  class_embed_type: null
+  down_block_types:
+    - DownBlock2D
+    - DownBlock2D
+    - DownBlock2D
+    - DownBlock2D
+  downsample_padding: 1
+  downsample_type: conv
+  dropout: 0.0
+  flip_sin_to_cos: true
+  freq_shift: 0
+  in_channels: 2
+  layers_per_block: 2
+  mid_block_scale_factor: 1
+  norm_eps: 1e-05
+  norm_num_groups: 32
+  num_class_embeds: null
+  num_train_timesteps: null
+  out_channels: 2
+  resnet_time_scale_shift: scale_shift
+  sample_size: 128
+  time_embedding_type: positional
+  up_block_types:
+    - UpBlock2D
+    - UpBlock2D
+    - UpBlock2D
+    - UpBlock2D
+  upsample_type: conv
+
+noise_scheduler:
+  target: diffusers.EDMDPMSolverMultistepScheduler
+  params:
+    num_train_timesteps: 1000
+
+loss_fn:
+  target: losses.loss.EDMLoss
+  params:
+    sigma_data: 0.5
+
+optimizer:
+  betas:
+    - 0.9
+    - 0.999
+  eps: 1e-08
+  lr: 1e-4
+  weight_decay: 1e-2
+
+lr_scheduler:
+  #name: cosine
+  name: constant
+  num_warmup_steps: 500
+  num_cycles: 0.5
+  power: 1.0
+
+dataloader:
+  data_dir: /scratch/kdur_root/kdur/shared_data/pdebench_data/2D/diffusion-reaction/2D_diff-react_NA_NA_reorg2.h5
+  batch_size: 16
+  num_workers: 0
+  split_ratios: 
+    - 0.8
+    - 0.2
+    - 0.0
+  transform: normalize
+  transform_args:
+    mean: [-0.0311127,  -0.0199022]
+    std: [0.1438150, 0.1117546] 
+    target_std: 0.5
+  data_name: diffusion_reaction
+
+accelerator:
+  mixed_precision: fp16
+  gradient_accumulation_steps: 1
+  log_with: tensorboard
+
+ema:
+  use_ema: True
+  offload_ema: False
+  ema_max_decay: 0.9999
+  ema_inv_gamma: 1.0
+  ema_power: 0.75
+  foreach: True
+
+general:
+  seed: 42
+  num_epochs: null
+  num_training_steps: 100000
+  known_channels: [0,1]
+  same_mask: True
+  scale_lr: False
+  output_dir: /scratch/kdur_root/kdur/ylzhuang/log/diffusion_reaction_uncond
+  logging_dir: diff_react
+  tracker_project_name: diffreact_tracker
+  save_image_epochs: 5
+  save_model_epochs: 50
+  checkpointing_steps: 25000
+  eval_batch_size: 8
+  cond_drop_prob: null
+  do_edm_style_training: True
+  snr_gamma: null
+  channel_names: ["u", "v"]
