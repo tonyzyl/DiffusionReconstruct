@@ -3,6 +3,9 @@
 
 Demo: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1RzcvX7jHDVc1VTkyUAe8bRA3C93xEffd?usp=sharing); [![Model on HF](https://huggingface.co/datasets/huggingface/badges/resolve/main/model-on-hf-sm.svg)](https://huggingface.co/tonyzyl/DiffusionReconstruct)
 
+This repository contains the code for the paper "Spatially-Aware Diffusion Models with Cross-Attention for Global Field Reconstruction with Sparse Observations". The paper is available on [arXiv](  
+https://doi.org/10.48550/arXiv.2409.00230).
+
 ### Summary of the work
 
 * We propose a cross-attention diffusion model for global field reconstruction.
@@ -104,3 +107,18 @@ srun accelerate launch --config_file <path to accelerate config> \
 * When loading from checkpoint, the parameters of EMA are not properly loaded, this is likely a bug of diffusers(v0.29.2), for details on how to fix this, please refer to the discussion in the comments.
 * If not loading the dataset in memory, the implemented xarray is not optimized for fetching data from disk.
 * The training script follows the diffusers example, which only save the optimization state of the main process, for proper loading from checkpoint, one should save/load all the states of the processes.
+
+#### Citation
+If you find this work useful, please consider citing the following paper:
+
+```bibtex
+@misc{zhuang2024spatiallyawarediffusionmodelscrossattention,
+      title={Spatially-Aware Diffusion Models with Cross-Attention for Global Field Reconstruction with Sparse Observations}, 
+      author={Yilin Zhuang and Sibo Cheng and Karthik Duraisamy},
+      year={2024},
+      eprint={2409.00230},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2409.00230}, 
+}
+```
