@@ -62,6 +62,7 @@ def parse_args():
     parser.add_argument('--channel_mean', action='store_true', help="Whether to output the channel mean.")
     parser.add_argument('--structure_sampling', action='store_true', default=False, help="Whether to sample with vt.")
     parser.add_argument('--noise_level', type=float, default=0., help="Noise level for evaluation.")
+    parser.add_argument('--noise_type', type=str, default='white', help="Type of noise to add. Opitons: 'white', 'pink', 'red', 'blue', 'purple'.")
     parser.add_argument('--verbose', action='store_true', help="Whether to print verbose information.")
     parser.add_argument('--total_eval', type=int, default=1000, help="Total number of evaluation samples.")
 
@@ -124,7 +125,8 @@ def main(args):
     select_idx = np.arange(0, args.total_eval)
     reduced_val_dataset = torch.utils.data.Subset(val_dataset, select_idx)
 
-    unet = accelerator.prepare_model(unet ,evaluation_mode=True)
+    unet = accelerator.prepare_model(unet, evaluation_mode=True)
+    resolution = unet.config.sample_size
 
     if args.conditioning_type == 'xattn' or args.conditioning_type == 'cfg':
         pipeline = InverseProblem2DCondPipeline(unet, scheduler=copy.deepcopy(noise_scheduler))
@@ -140,7 +142,7 @@ def main(args):
         "known_channels": general_config.known_channels,
         #"same_mask": general_config.same_mask,
         }
-        x_idx, y_idx = torch.meshgrid(torch.arange(8, 128, vt_spacing), torch.arange(8, 128, vt_spacing))
+        x_idx, y_idx = torch.meshgrid(torch.arange(vt_spacing, resolution, vt_spacing), torch.arange(vt_spacing, resolution, vt_spacing))
         x_idx = x_idx.flatten().to(accelerator.device)
         y_idx = y_idx.flatten().to(accelerator.device)
         if "darcy" in args.subfolder:
@@ -175,13 +177,14 @@ def main(args):
                                                     known_channels=general_config.known_channels,
                                                     device = accelerator.device,
                                                     mode = args.mode, #'edm', 'pipeline', 'vt'
-                                                    conditioning_type=args.conditioning_type,
+                                                    conditioning_type = args.conditioning_type,
                                                     inverse_transform = dataloader_config.transform, # 'normalize'
-                                                    inverse_transform_args=dataloader_config.transform_args,
-                                                    channel_mean=args.channel_mean,
-                                                    structure_sampling=args.structure_sampling,
-                                                    noise_level=args.noise_level,
-                                                    verbose=args.verbose,
+                                                    inverse_transform_args = dataloader_config.transform_args,
+                                                    channel_mean = args.channel_mean,
+                                                    structure_sampling = args.structure_sampling,
+                                                    noise_level = args.noise_level,
+                                                    noise_type = args.noise_type,
+                                                    verbose = args.verbose,
         )
 
         csv_filename = args.path_to_csv
