@@ -1,0 +1,14 @@
+diffusers[torch]
+transformers
+dask
+xarray
+tensorboard
+einops
+h5netcdf
+h5py
+scipy
+pandas
+matplotlib
+Omegaconf
+ipykernel
+notebook

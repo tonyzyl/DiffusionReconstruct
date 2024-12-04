@@ -4,7 +4,7 @@
 Demo: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1RzcvX7jHDVc1VTkyUAe8bRA3C93xEffd?usp=sharing); [![Model on HF](https://huggingface.co/datasets/huggingface/badges/resolve/main/model-on-hf-sm.svg)](https://huggingface.co/tonyzyl/DiffusionReconstruct)
 
 This repository contains the code for the paper "Spatially-Aware Diffusion Models with Cross-Attention for Global Field Reconstruction with Sparse Observations". The paper is available on [arXiv](  
-https://doi.org/10.48550/arXiv.2409.00230).
+https://doi.org/10.48550/arXiv.2409.00230), accepted by the CMAME.
 
 ### Summary of the work
 
@@ -107,6 +107,9 @@ srun accelerate launch --config_file <path to accelerate config> \
 * When loading from checkpoint, the parameters of EMA are not properly loaded, this is likely a bug of diffusers(v0.29.2), for details on how to fix this, please refer to the discussion in the comments.
 * If not loading the dataset in memory, the implemented xarray is not optimized for fetching data from disk.
 * The training script follows the diffusers example, which only save the optimization state of the main process, for proper loading from checkpoint, one should save/load all the states of the processes.
+
+### Changelog
+* 2024-12-04: Corrected the error in the noise percentage being overestimated; the conclusion remains the same. Paper: Added a comparison between training from scratch and fine-tuning to adapt to different resolutions. Also added a comparison for colored noise. A no-version requirement is provided for the ease of installation.
 
 #### Citation
 If you find this work useful, please consider citing the following paper:

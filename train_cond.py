@@ -97,6 +97,14 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--resume_from_path",
+        type=str,
+        default=None,
+        help=(
+            "Whether training should be resumed from a previous saved path. Model loading is done by from_pretrained."
+        ),
+    )
+    parser.add_argument(
         "--checkpoints_total_limit",
         type=int,
         default=None,
@@ -155,7 +163,11 @@ def main(args):
         unet_mdl_cls = diffuserUNet2DCFG
     else:
         raise ValueError(f"Unknown conditioning type {args.conditioning_type}")
-    unet = unet_mdl_cls.from_config(config=unet_config)
+    
+    if args.resume_from_path:
+        unet = unet_mdl_cls.from_pretrained(args.resume_from_path)
+    else:
+        unet = unet_mdl_cls.from_config(config=unet_config)
 
     logging_dir = Path(general_config.output_dir, general_config.logging_dir)
     #accelerator_dataloader_config = DataLoaderConfiguration(dispatch_batches=True)

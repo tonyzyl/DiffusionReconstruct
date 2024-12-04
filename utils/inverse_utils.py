@@ -325,3 +325,75 @@ def ensemble_sample(pipeline, sample_size, mask, sampler_kwargs=None, class_labe
         samples[count:count+num_sample] = tmp_samples
         count += num_sample
     return samples
+
+def colored_noise(shape, noise_type='pink', device='cpu', normalize=False):
+    """
+    Generate colored noise (pink, red, blue, purple) in the spatial domain.
+    
+    Args:
+        shape (tuple): Shape of the noise tensor (b, c, h, w).
+        noise_type (str): Type of noise ('white', 'pink', 'red', 'blue', 'purple').
+        device (str): Device for the tensor.
+        normalize (bool): Whether to normalize the output to [-1, 1] range.
+        
+    Returns:
+        torch.Tensor: Colored noise tensor (b, c, h, w).
+    """
+    if len(shape) != 4:
+        raise ValueError("Input shape must be of the form (b, c, h, w)")
+    
+    valid_noise_types = ['white', 'pink', 'red', 'blue', 'purple']
+    if noise_type not in valid_noise_types:
+        raise ValueError(f"Noise type must be one of {valid_noise_types}")
+    
+    b, c, h, w = shape
+    
+    # Initialize the output noise tensor
+    output_noise = torch.zeros(shape, device=device)
+    
+    # Loop over the batch and channel dimensions
+    for batch in range(b):
+        for channel in range(c):
+            # Generate white noise for the current (h, w) slice
+            white_noise = torch.randn(h, w, device=device)
+            
+            # Apply Fourier transform to convert to frequency domain
+            noise_fft = torch.fft.rfftn(white_noise, dim=(-2, -1))
+            
+            # Create frequency grid for both dimensions
+            freqs_x = torch.fft.fftfreq(h, d=1.0).to(device)
+            freqs_y = torch.fft.rfftfreq(w, d=1.0).to(device)
+            
+            # Generate 2D frequency grid
+            freq_grid = torch.sqrt(freqs_x[:, None]**2 + freqs_y[None, :]**2)
+            eps = torch.finfo(freq_grid.dtype).eps
+            
+            # Modify the amplitude spectrum based on the type of colored noise
+            spectral_factors = {
+                'white': lambda f: torch.ones_like(f),
+                'pink': lambda f: 1.0 / torch.sqrt(f + eps),
+                'red': lambda f: 1.0 / (f + eps),
+                'blue': lambda f: torch.sqrt(f + eps),
+                'purple': lambda f: f + eps
+            }
+            
+            factor = spectral_factors[noise_type](freq_grid)
+            
+            # Handle DC component (zero frequency) specially
+            if noise_type in ['pink', 'red']:
+                factor[0, 0] = 1.0
+            
+            # Multiply the amplitude spectrum by the factor
+            noise_fft *= factor
+            
+            # Inverse Fourier transform back to the spatial domain
+            colored_noise = torch.fft.irfftn(noise_fft, s=(h, w), dim=(-2, -1))
+            
+            # Normalize if requested
+            if normalize:
+                colored_noise = 2.0 * (colored_noise - colored_noise.min()) / (colored_noise.max() - colored_noise.min()) - 1.0
+            
+            # Assign the generated noise to the corresponding slice in the output tensor
+            output_noise[batch, channel] = colored_noise
+    
+    return output_noise

@@ -10,7 +10,7 @@ from einops import rearrange, repeat
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(parent_dir)
-from utils.inverse_utils import create_scatter_mask, ensemble_sample
+from utils.inverse_utils import create_scatter_mask, ensemble_sample, colored_noise
 from dataloader.dataset_class import inverse_normalize_transform
 
 @torch.no_grad()
@@ -60,7 +60,8 @@ def get_metrics_2D(val_dataset, pipeline=None, vt=None, vt_model=None, batch_siz
                  sampler_kwargs=None, mask_kwargs=None, known_channels=None, device='cpu', mode='edm', #'edm', 'pipeline', 'vt', 'mean'
                  conditioning_type = None, #xattn, cfg
                  inverse_transform=None, inverse_transform_args=None, channel_mean=True,
-                 structure_sampling=False, noise_level=0, verbose=False):
+                 structure_sampling=False, noise_level=0, noise_type='white', # 'white', 'pink', 'red', 'blue', 'purple'
+                 verbose=False):
 
     if inverse_transform == 'normalize':
         inverse_transform = inverse_normalize_transform
@@ -93,6 +94,9 @@ def get_metrics_2D(val_dataset, pipeline=None, vt=None, vt_model=None, batch_siz
         print(f'Calculating metrics for {mode}, ensemble size: {ensemble_size}')
     else:
         print('Calculating metrics for mean, all other arguments are ignored.')
+    
+    if structure_sampling and noise_type != 'white':
+        Warning("Colored noise is not supported with structure sampling. Ignoring noise_type.")
 
     count = 0
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
@@ -119,7 +123,9 @@ def get_metrics_2D(val_dataset, pipeline=None, vt=None, vt_model=None, batch_siz
                     for idx, known_channel in enumerate(range(C) if known_channels is None else known_channels):
                         field = y_true[b, known_channel][grid_points[:,1], grid_points[:,0]].flatten()
                         if noise_level > 0:
-                            field += randn_tensor(field.shape, device=device) * noise_level * field # y_obs = y_true + noise_level * y_true
+                            # drop support for colored noise in this case
+                            noise = randn_tensor(field.shape, device=device)
+                            field += noise * noise_level * field # y_obs = y_true + noise_level * y_true
                         interpolated_values = vt.interpolate(grid_points, field)
                         interpolated_fields[b, idx] = torch.tensor(interpolated_values, 
                                                                 dtype=y_true.dtype, 
@@ -130,8 +136,11 @@ def get_metrics_2D(val_dataset, pipeline=None, vt=None, vt_model=None, batch_siz
                 scatter_mask = create_scatter_mask(y_true, generator=generator, device=device, **mask_kwargs)
                 tmp_y_true = y_true.clone()
                 if noise_level > 0:
-                    tmp_y_true += randn_tensor(tmp_y_true.shape, device=device) * noise_level * tmp_y_true # y_obs = y_true + noise_level * y_true
-                tmp_y_true += noise_level
+                    if noise_type == 'white':
+                        noise = randn_tensor(tmp_y_true.shape, device=device)
+                    else:
+                        noise = colored_noise(tmp_y_true.shape, noise_type=noise_type, device=device)
+                    tmp_y_true += noise * noise_level * tmp_y_true # y_obs = y_true + noise_level * y_true
                 interpolated_fields = vt(known_fields=tmp_y_true, mask=scatter_mask)
 
             if mode == 'edm':

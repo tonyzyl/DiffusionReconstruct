@@ -185,7 +185,7 @@ def pdedata2dataloader(data_dir, batch_size=32, num_workers=1, split_ratios=(0.7
                               rearrange_args=rearrange_args, random_dataset=False, generator=generator, return_dataset=return_dataset)
     elif data_name == 'compressible_NS':
         # keys = ['Vx' , 'Vy', 'density', 'pressure']
-        xarray = xr.open_dataset(data_dir, phony_dims='access', 
+        xarray = xr.open_dataset(data_dir, phony_dims='access', engine='h5netcdf',
                                 drop_variables=['t-coordinate', 'x-coordinate', 'y-coordinate'], 
                                 chunks='auto')
         xarray= xarray.rename({
@@ -198,7 +198,7 @@ def pdedata2dataloader(data_dir, batch_size=32, num_workers=1, split_ratios=(0.7
         return dataset2dataloader(full_dataset, batch_size, num_workers, split_ratios=split_ratios, random_dataset=False, generator=generator, return_dataset=return_dataset)
     elif data_name == 'diffusion_reaction':
         # keys = ['u', 'v']
-        xarray = xr.open_dataset(data_dir, phony_dims='access', 
+        xarray = xr.open_dataset(data_dir, phony_dims='access', engine='h5netcdf',
                                 drop_variables=['t-coordinate', 'x-coordinate', 'y-coordinate'], 
                                 chunks='auto')
         xarray= xarray.rename({

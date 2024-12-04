@@ -230,7 +230,8 @@ def plot_one_sample(samples, num_in_batch=0, cb=True, mask=None, channel_names=N
     if save_name is not None:
         plt.savefig(save_name + '.png', dpi=dpi, bbox_inches='tight')
 
-def plot_horizontal(images_list, channel_names=None, image_names=None, save_name=None, mask=None, plot_mask_idx=[], which_cb=None, dpi=300):
+def plot_horizontal(images_list, channel_names=None, image_names=None, save_name=None, mask=None, plot_mask_idx=[],
+                    which_cb=None, dpi=300, font_size=14):
     '''
     images_list: list of images, each with shape (C, H, W)
     mask: Optional, shape (C, H, W)
@@ -271,9 +272,9 @@ def plot_horizontal(images_list, channel_names=None, image_names=None, save_name
                     ax.scatter(mask_indices[1], mask_indices[0], c='black', marker='x', s=7)
             if channel_names is not None:
                 if image_names is None: 
-                    ax.set_title(channel_names[ch_idx])
+                    ax.set_title(channel_names[ch_idx], fontsize=font_size)
                 else:
-                    ax.set_title(f'{channel_names[ch_idx]} - {image_names[img_idx]}')
+                    ax.set_title(f'{channel_names[ch_idx]} - {image_names[img_idx]}', fontsize=font_size)
             ax.axis('off')
     
     if which_cb is not None:
