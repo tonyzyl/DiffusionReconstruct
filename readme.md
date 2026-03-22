@@ -54,14 +54,19 @@ The Voronoi-tessellated (VT) fields serve as an inductive bias and the proposed 
 
 The diffusion-reaction equation describes the evolution of activator and inhibitor concentration profiles from a Gaussian initialization, governed by a cubic reaction relation. 
 
-The diffusion model, equipped with the proposed encoding block, captures possible realizations, with the mean converging to the deterministic output.
+<div style="text-align: left;">
+  <img src="git_assest/pred_cor_freq_plot.png" alt="Bar Chart">
+  <p>Figure 4: Frequency distribution of the generated fields by the diffusion model and VT-UNet on an instance from the diffusion-reaction dataset.</p>
+</div>
+
+The diffusion model, equipped with the proposed encoding block, captures possible realizations, matching the target frequency, with the mean converging to the deterministic output.
 
 ---
 ### Ensemble sampling for enhancing Data Assimilation(DA)
 
 <div style="text-align: left;">
   <img src="git_assest/error_hist.png">
-  <p>Figure 4: Histogram of relative error improvement distribution with different DA error covariances on the shallow water equations.</p>
+  <p>Figure 5: Histogram of relative error improvement distribution with different DA error covariances on the shallow water equations.</p>
 </div>
 
 Overall, both data assimilation methods, whether employing the diffusion ensemble covariance matrix or the identity covariance matrix, enhance the average accuracy of field reconstruction. However, the diffusion ensemble covariance matrix consistently outperforms in the majority of corrections applied to the diffusion model output.
@@ -83,6 +88,22 @@ We recommend using the virtual environment (Python 3.11) to install the required
 
 ```bash
 pip install -r requirements.txt
+```
+
+*Update on 2026-03-22*: Resolved version conflicts, provided `requirements_keydep.txt`, key packages are listed below if installation from `requirements.txt` fails:
+
+```bash
+pip install peft==0.11.1
+pip install diffusers["torch"]==0.29.2
+pip install transformers==4.42.4
+pip install xarray==2023.7.0
+pip install torchvision
+pip install einops
+pip install h5py
+pip install h5netcdf
+pip install scipy
+pip install pandas
+pip install matplotlib
 ```
 
 ---
@@ -109,19 +130,20 @@ srun accelerate launch --config_file <path to accelerate config> \
 * The training script follows the diffusers example, which only save the optimization state of the main process, for proper loading from checkpoint, one should save/load all the states of the processes.
 
 ### Changelog
-* 2024-12-04: Corrected the error in the noise percentage being overestimated; the conclusion remains the same. Paper: Added a comparison between training from scratch and fine-tuning to adapt to different resolutions. Also added a comparison for colored noise. A no-version requirement is provided for the ease of installation.
+* 2024-12-04: Corrected the error in the noise percentage being overestimated; the conclusion remains the same. Paper: Added a comparison between training from scratch and fine-tuning to adapt to different resolutions. Also added a comparison for colored noise.
+* 2026-03-22: Resolved version conflicts, added frequency plot, udpated citation.
 
 #### Citation
 If you find this work useful, please consider citing the following paper:
 
 ```bibtex
-@misc{zhuang2024spatiallyawarediffusionmodelscrossattention,
-      title={Spatially-Aware Diffusion Models with Cross-Attention for Global Field Reconstruction with Sparse Observations}, 
-      author={Yilin Zhuang and Sibo Cheng and Karthik Duraisamy},
-      year={2024},
-      eprint={2409.00230},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG},
-      url={https://arxiv.org/abs/2409.00230}, 
+@article{zhuang2025spatially,
+  title={Spatially-aware diffusion models with cross-attention for global field reconstruction with sparse observations},
+  author={Zhuang, Yilin and Cheng, Sibo and Duraisamy, Karthik},
+  journal={Computer Methods in Applied Mechanics and Engineering},
+  volume={435},
+  pages={117623},
+  year={2025},
+  publisher={Elsevier}
 }
 ```
